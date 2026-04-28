@@ -44,6 +44,7 @@ var sym_slant: emacs.emacs_value = undefined;
 var sym_italic: emacs.emacs_value = undefined;
 var sym_underline: emacs.emacs_value = undefined;
 var sym_strike_through: emacs.emacs_value = undefined;
+var sym_inverse_video: emacs.emacs_value = undefined;
 var sym_t: emacs.emacs_value = undefined;
 // Buffer navigation symbols for incremental rendering
 var sym_goto_char: emacs.emacs_value = undefined;
@@ -69,6 +70,7 @@ fn initGlobalSymbols(env: *emacs.emacs_env) void {
     sym_italic = emacs.make_global_ref(env, env.intern.?(env, "italic"));
     sym_underline = emacs.make_global_ref(env, env.intern.?(env, ":underline"));
     sym_strike_through = emacs.make_global_ref(env, env.intern.?(env, ":strike-through"));
+    sym_inverse_video = emacs.make_global_ref(env, env.intern.?(env, ":inverse-video"));
     sym_t = emacs.make_global_ref(env, env.intern.?(env, "t"));
     sym_goto_char = emacs.make_global_ref(env, env.intern.?(env, "goto-char"));
     sym_forward_line = emacs.make_global_ref(env, env.intern.?(env, "forward-line"));
@@ -324,6 +326,13 @@ fn buildFacePlist(env: *emacs.emacs_env, style: *const Style, palette: *const co
         const tmp = fg;
         fg = bg;
         bg = tmp;
+    }
+
+    if (style.flags.inverse and (fg == .none or bg == .none)) {
+        plist_items[n] = sym_inverse_video;
+        n += 1;
+        plist_items[n] = sym_t;
+        n += 1;
     }
 
     // Foreground color
