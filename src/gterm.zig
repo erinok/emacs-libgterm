@@ -44,8 +44,10 @@ var sym_slant: emacs.emacs_value = undefined;
 var sym_italic: emacs.emacs_value = undefined;
 var sym_underline: emacs.emacs_value = undefined;
 var sym_strike_through: emacs.emacs_value = undefined;
-var sym_inverse_video: emacs.emacs_value = undefined;
 var sym_t: emacs.emacs_value = undefined;
+var sym_default: emacs.emacs_value = undefined;
+var sym_face_foreground: emacs.emacs_value = undefined;
+var sym_face_background: emacs.emacs_value = undefined;
 // Buffer navigation symbols for incremental rendering
 var sym_goto_char: emacs.emacs_value = undefined;
 var sym_forward_line: emacs.emacs_value = undefined;
@@ -70,8 +72,10 @@ fn initGlobalSymbols(env: *emacs.emacs_env) void {
     sym_italic = emacs.make_global_ref(env, env.intern.?(env, "italic"));
     sym_underline = emacs.make_global_ref(env, env.intern.?(env, ":underline"));
     sym_strike_through = emacs.make_global_ref(env, env.intern.?(env, ":strike-through"));
-    sym_inverse_video = emacs.make_global_ref(env, env.intern.?(env, ":inverse-video"));
     sym_t = emacs.make_global_ref(env, env.intern.?(env, "t"));
+    sym_default = emacs.make_global_ref(env, env.intern.?(env, "default"));
+    sym_face_foreground = emacs.make_global_ref(env, env.intern.?(env, "face-foreground"));
+    sym_face_background = emacs.make_global_ref(env, env.intern.?(env, "face-background"));
     sym_goto_char = emacs.make_global_ref(env, env.intern.?(env, "goto-char"));
     sym_forward_line = emacs.make_global_ref(env, env.intern.?(env, "forward-line"));
     sym_line_beginning_position = emacs.make_global_ref(env, env.intern.?(env, "line-beginning-position"));
@@ -314,6 +318,11 @@ fn resolveColor(env: *emacs.emacs_env, col: Style.Color, palette: *const color.P
     };
 }
 
+fn defaultFaceColor(env: *emacs.emacs_env, func: emacs.emacs_value) emacs.emacs_value {
+    var args = [_]emacs.emacs_value{ sym_default, emacs.nil(env), sym_t };
+    return env.funcall.?(env, func, args.len, &args);
+}
+
 /// Build a face property list from a Style. Returns nil for default style.
 fn buildFacePlist(env: *emacs.emacs_env, style: *const Style, palette: *const color.Palette) emacs.emacs_value {
     var plist_items: [16]emacs.emacs_value = undefined;
@@ -328,18 +337,16 @@ fn buildFacePlist(env: *emacs.emacs_env, style: *const Style, palette: *const co
         bg = tmp;
     }
 
-    if (style.flags.inverse and (fg == .none or bg == .none)) {
-        plist_items[n] = sym_inverse_video;
-        n += 1;
-        plist_items[n] = sym_t;
-        n += 1;
-    }
-
     // Foreground color
     if (fg != .none) {
         plist_items[n] = sym_foreground;
         n += 1;
         plist_items[n] = resolveColor(env, fg, palette);
+        n += 1;
+    } else if (style.flags.inverse) {
+        plist_items[n] = sym_foreground;
+        n += 1;
+        plist_items[n] = defaultFaceColor(env, sym_face_background);
         n += 1;
     }
 
@@ -348,6 +355,11 @@ fn buildFacePlist(env: *emacs.emacs_env, style: *const Style, palette: *const co
         plist_items[n] = sym_background;
         n += 1;
         plist_items[n] = resolveColor(env, bg, palette);
+        n += 1;
+    } else if (style.flags.inverse) {
+        plist_items[n] = sym_background;
+        n += 1;
+        plist_items[n] = defaultFaceColor(env, sym_face_foreground);
         n += 1;
     }
 
@@ -496,7 +508,7 @@ fn gtermRender(
             }
 
             const cp = cell.codepoint();
-            if (cp == 0) {
+            if (cp == 0 or cp == 0x00A0) {
                 run_buf.append(' ') catch {};
             } else {
                 var utf8_buf: [4]u8 = undefined;
@@ -723,7 +735,7 @@ fn gtermRenderDirty(
             }
 
             const cp = cell.codepoint();
-            if (cp == 0) {
+            if (cp == 0 or cp == 0x00A0) {
                 run_buf.append(' ') catch {};
             } else {
                 var utf8_buf: [4]u8 = undefined;
