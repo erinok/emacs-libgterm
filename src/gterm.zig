@@ -37,6 +37,8 @@ const allocator: Allocator = gpa.allocator();
 var sym_face: emacs.emacs_value = undefined;
 var sym_foreground: emacs.emacs_value = undefined;
 var sym_background: emacs.emacs_value = undefined;
+var sym_inherit: emacs.emacs_value = undefined;
+var sym_shadow: emacs.emacs_value = undefined;
 var sym_weight: emacs.emacs_value = undefined;
 var sym_bold: emacs.emacs_value = undefined;
 var sym_light: emacs.emacs_value = undefined;
@@ -65,6 +67,8 @@ fn initGlobalSymbols(env: *emacs.emacs_env) void {
     sym_face = emacs.make_global_ref(env, env.intern.?(env, "face"));
     sym_foreground = emacs.make_global_ref(env, env.intern.?(env, ":foreground"));
     sym_background = emacs.make_global_ref(env, env.intern.?(env, ":background"));
+    sym_inherit = emacs.make_global_ref(env, env.intern.?(env, ":inherit"));
+    sym_shadow = emacs.make_global_ref(env, env.intern.?(env, "shadow"));
     sym_weight = emacs.make_global_ref(env, env.intern.?(env, ":weight"));
     sym_bold = emacs.make_global_ref(env, env.intern.?(env, "bold"));
     sym_light = emacs.make_global_ref(env, env.intern.?(env, "light"));
@@ -309,12 +313,20 @@ fn rgbToEmacsStr(env: *emacs.emacs_env, rgb: color.RGB) emacs.emacs_value {
     return env.make_string.?(env, &buf, 7);
 }
 
+fn dimRGB(rgb: color.RGB) color.RGB {
+    return .{
+        .r = rgb.r / 2,
+        .g = rgb.g / 2,
+        .b = rgb.b / 2,
+    };
+}
+
 /// Resolve a Style.Color to an Emacs color string value (or nil).
-fn resolveColor(env: *emacs.emacs_env, col: Style.Color, palette: *const color.Palette) emacs.emacs_value {
+fn resolveColor(env: *emacs.emacs_env, col: Style.Color, palette: *const color.Palette, faint: bool) emacs.emacs_value {
     return switch (col) {
         .none => emacs.nil(env),
-        .palette => |idx| rgbToEmacsStr(env, palette[idx]),
-        .rgb => |rgb| rgbToEmacsStr(env, rgb),
+        .palette => |idx| rgbToEmacsStr(env, if (faint) dimRGB(palette[idx]) else palette[idx]),
+        .rgb => |rgb| rgbToEmacsStr(env, if (faint) dimRGB(rgb) else rgb),
     };
 }
 
@@ -341,12 +353,17 @@ fn buildFacePlist(env: *emacs.emacs_env, style: *const Style, palette: *const co
     if (fg != .none) {
         plist_items[n] = sym_foreground;
         n += 1;
-        plist_items[n] = resolveColor(env, fg, palette);
+        plist_items[n] = resolveColor(env, fg, palette, style.flags.faint);
         n += 1;
     } else if (style.flags.inverse) {
         plist_items[n] = sym_foreground;
         n += 1;
         plist_items[n] = defaultFaceColor(env, sym_face_background);
+        n += 1;
+    } else if (style.flags.faint) {
+        plist_items[n] = sym_inherit;
+        n += 1;
+        plist_items[n] = sym_shadow;
         n += 1;
     }
 
@@ -354,7 +371,7 @@ fn buildFacePlist(env: *emacs.emacs_env, style: *const Style, palette: *const co
     if (bg != .none) {
         plist_items[n] = sym_background;
         n += 1;
-        plist_items[n] = resolveColor(env, bg, palette);
+        plist_items[n] = resolveColor(env, bg, palette, false);
         n += 1;
     } else if (style.flags.inverse) {
         plist_items[n] = sym_background;
