@@ -132,6 +132,19 @@ Automatically clones Ghostty and applies the build patch if needed."
       (error "gterm: module not found at %s" gterm-module-path)))
   (module-load gterm-module-path))
 
+;; Defined by the native module; tell the byte/native compiler.
+(declare-function gterm-new "ext:gterm-module")
+(declare-function gterm-feed "ext:gterm-module")
+(declare-function gterm-resize "ext:gterm-module")
+(declare-function gterm-free "ext:gterm-module")
+(declare-function gterm-render "ext:gterm-module")
+(declare-function gterm-cursor-keys-mode "ext:gterm-module")
+(declare-function gterm-cursor-info "ext:gterm-module")
+(declare-function gterm-mode-enabled "ext:gterm-module")
+(declare-function gterm-scroll-viewport "ext:gterm-module")
+(declare-function gterm-viewport-is-bottom "ext:gterm-module")
+(declare-function face-remap-remove-relative "face-remap")
+
 ;; ── Customization ───────────────────────────────────────────────────────
 
 (defgroup gterm nil
