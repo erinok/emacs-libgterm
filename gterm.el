@@ -176,6 +176,9 @@ Automatically clones Ghostty and applies the build patch if needed."
 (defvar-local gterm--height 24
   "Current terminal height in rows.")
 
+(defvar-local gterm--copy-mode nil
+  "Non-nil when gterm is in copy mode.")
+
 (defvar-local gterm--rendered nil
   "Non-nil after the first full render has been done.")
 
@@ -184,15 +187,19 @@ Automatically clones Ghostty and applies the build patch if needed."
 (defun gterm--refresh ()
   "Refresh the buffer with current terminal content.
 Uses incremental rendering after the first full render."
-  (when gterm--term
+  (when (and gterm--term (not gterm--copy-mode))
     (let* ((inhibit-read-only t)
            (cursor-pos
             ;; Always do full render for now (incremental disabled)
             (progn
               (erase-buffer)
               (gterm-render gterm--term))))
+      (gterm--shrink-fallback-glyphs)
       (when (integerp cursor-pos)
         (goto-char cursor-pos))
+      ;; The buffer is exactly the viewport; never let Emacs scroll it.
+      (dolist (w (get-buffer-window-list nil nil t))
+        (set-window-start w (point-min) t))
       ;; Update cursor visibility and style from terminal state
       (when (fboundp 'gterm-cursor-info)
         (let* ((info (gterm-cursor-info gterm--term))
@@ -200,6 +207,48 @@ Uses incremental rendering after the first full render."
                (style (cdr info)))
           (setq-local cursor-type
                       (if visible style nil)))))))
+
+;; Glyphs missing from the default font come from fallback fonts (e.g. STIX,
+;; Arial Unicode) whose taller metrics make rows taller than the default line.
+;; Then the viewport overflows the window and Emacs scrolls it, so the display
+;; jitters.  Shrink such glyphs so each row keeps the default height.
+(defcustom gterm-fallback-glyph-height 0.8
+  "Relative face height for glyphs the default font lacks, or nil to leave them."
+  :type '(choice (const nil) number)
+  :group 'gterm)
+
+(defcustom gterm-glyph-substitutions
+  '((?⏺ . ?●) (?⏸ . ?‖) (?⏵ . ?▶) (?⏴ . ?◀) (?⏹ . ?■))
+  "Glyphs whose only macOS font (STIX Two Math) is too tall even when shrunk.
+Displayed as the substitute via `buffer-display-table'."
+  :type '(alist :key-type character :value-type character)
+  :group 'gterm)
+
+(defun gterm--setup-display-table ()
+  (let ((dt (make-display-table)))
+    (pcase-dolist (`(,from . ,to) gterm-glyph-substitutions)
+      (aset dt from (vector (make-glyph-code to))))
+    (setq buffer-display-table dt)))
+
+(defvar gterm--fallback-char-cache (make-char-table 'gterm)
+  "Char → `fallback' or `ok', for the default font.")
+
+(defun gterm--shrink-fallback-glyphs ()
+  (when (and gterm-fallback-glyph-height (display-graphic-p))
+    (let ((font (face-attribute 'default :font)))
+      (when (fontp font)
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward "[^\0-\177]" nil t)
+            (let* ((ch (char-before))
+                   (v (or (aref gterm--fallback-char-cache ch)
+                          (aset gterm--fallback-char-cache ch
+                                (if (or (font-has-char-p font ch)
+                                        (assq ch gterm-glyph-substitutions))
+                                    'ok 'fallback)))))
+              (when (eq v 'fallback)
+                (add-face-text-property (1- (point)) (point)
+                                        (list :height gterm-fallback-glyph-height))))))))))
 
 (defun gterm--full-refresh ()
   "Force a full screen re-render (not incremental)."
@@ -412,66 +461,69 @@ optionally at the given line number."
 
 ;; ── Paste and Copy ──────────────────────────────────────────────────────
 
+;; Last text sent by `gterm-yank'/`gterm-yank-pop', so M-y can erase it.
+(defvar-local gterm--last-yank nil)
+
 (defun gterm-yank ()
   "Paste the most recent kill ring entry into the terminal.
 Uses bracketed paste mode if the terminal has it enabled."
   (interactive)
   (let ((text (current-kill 0 t)))
     (when text
+      (setq gterm--last-yank text)
       (gterm--send-paste text))))
 
-(defvar-local gterm--copy-mode nil
-  "Non-nil when gterm is in copy/selection mode.")
-
-(defun gterm-copy-mode ()
-  "Toggle copy mode for selecting and copying terminal text.
-In copy mode, normal Emacs movement and selection keys work.
-Press `q' or `C-c C-c' to exit copy mode.
-Selected text is copied to the kill ring on exit."
+(defun gterm-yank-pop ()
+  "Replace the just-yanked text with the previous kill ring entry.
+Erases it by sending one backspace per character, so it only works where
+the app treats the paste as plain editable text (not e.g. a collapsed
+\"[Pasted text]\" placeholder)."
   (interactive)
-  (if gterm--copy-mode
-      (gterm--copy-mode-exit)
-    (gterm--copy-mode-enter)))
+  (if (not (and gterm--last-yank (memq last-command '(gterm-yank gterm-yank-pop))))
+      (message "Previous command was not a yank")
+    (gterm-send-string (make-string (length gterm--last-yank) ?\177))
+    (let ((text (current-kill 1)))
+      (setq gterm--last-yank text)
+      (gterm--send-paste text))))
 
-(defun gterm--copy-mode-enter ()
-  "Enter copy mode."
-  (setq gterm--copy-mode t)
-  (setq buffer-read-only t)
-  (use-local-map gterm-copy-mode-map)
-  (message "gterm copy mode: move and select, `q' to exit, `y' to copy & exit"))
+;; Copy mode: a plain Emacs buffer (global keys, read-only) over a frozen
+;; snapshot of the screen.  Output keeps feeding the terminal but isn't
+;; rendered until exit, so point/region aren't clobbered.
+(defface gterm-copy-mode-line
+  '((t :background "#b35900" :foreground "white"))
+  "Mode line face while a gterm buffer is in copy mode.")
 
-(defun gterm--copy-mode-exit ()
-  "Exit copy mode and return to terminal mode."
-  (when (region-active-p)
-    (kill-ring-save (region-beginning) (region-end))
-    (message "Copied to kill ring"))
-  (deactivate-mark)
-  (setq gterm--copy-mode nil)
-  (use-local-map gterm-mode-map))
-
-(defun gterm-copy-mode-copy-and-exit ()
-  "Copy selected region to kill ring and exit copy mode."
-  (interactive)
-  (when (region-active-p)
-    (kill-ring-save (region-beginning) (region-end))
-    (message "Copied to kill ring"))
-  (gterm--copy-mode-exit))
+(defvar-local gterm--copy-mode-remap nil)
 
 (defvar gterm-copy-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Inherit standard Emacs movement keys
-    (set-keymap-parent map special-mode-map)
-    ;; Exit keys
-    (define-key map (kbd "q") #'gterm--copy-mode-exit)
-    (define-key map (kbd "C-c C-c") #'gterm--copy-mode-exit)
-    ;; Copy and exit
-    (define-key map (kbd "y") #'gterm-copy-mode-copy-and-exit)
-    (define-key map (kbd "M-w") #'gterm-copy-mode-copy-and-exit)
-    ;; Selection
-    (define-key map (kbd "C-SPC") #'set-mark-command)
-    (define-key map (kbd "C-@") #'set-mark-command)
+    (define-key map (kbd "C-c C-c") #'gterm-copy-mode-exit)
     map)
-  "Keymap for gterm copy mode.")
+  "Keymap for gterm copy mode; everything else is ordinary Emacs.")
+
+(defun gterm-copy-mode ()
+  "Enter copy mode: normal Emacs editing keys; `C-c C-c' returns to the terminal."
+  (interactive)
+  (setq gterm--copy-mode t)
+  (use-local-map gterm-copy-mode-map)
+  (setq gterm--copy-mode-remap
+        (list (face-remap-add-relative 'mode-line 'gterm-copy-mode-line)
+              (face-remap-add-relative 'mode-line-inactive 'gterm-copy-mode-line)))
+  (setq mode-name (propertize "COPY MODE" 'face '(:weight bold)))
+  (force-mode-line-update)
+  (message "gterm copy mode: C-c C-c to return to terminal"))
+
+(defun gterm-copy-mode-exit ()
+  "Leave copy mode and resume live terminal display."
+  (interactive)
+  (deactivate-mark)
+  (setq gterm--copy-mode nil)
+  (use-local-map gterm-mode-map)
+  (mapc #'face-remap-remove-relative gterm--copy-mode-remap)
+  (setq gterm--copy-mode-remap nil
+        mode-name "GTerm")
+  (force-mode-line-update)
+  (gterm--full-refresh))
 
 ;; ── Scrollback ──────────────────────────────────────────────────────────
 
@@ -582,10 +634,13 @@ Event format: (drag-n-drop POSITION (file OPERATIONS PATH...))."
 ;; ── Window size tracking ────────────────────────────────────────────────
 
 (defun gterm--calculate-size ()
-  "Calculate terminal size from the current window."
-  (let ((width (window-body-width))
-        (height (window-body-height)))
-    (cons width height)))
+  "Calculate terminal size: the smallest of the windows showing this buffer.
+Uses `window-max-chars-per-line' so the last column isn't lost to a
+truncation glyph when fringes are off."
+  (let ((wins (or (get-buffer-window-list (current-buffer) nil t)
+                  (list (selected-window)))))
+    (cons (apply #'min (mapcar #'window-max-chars-per-line wins))
+          (apply #'min (mapcar #'window-body-height wins)))))
 
 (defun gterm--maybe-resize ()
   "Resize the terminal if the window size changed."
@@ -618,6 +673,8 @@ Event format: (drag-n-drop POSITION (file OPERATIONS PATH...))."
     (define-key map (kbd "C-c C-c") #'gterm-send-ctrl-c)
     (define-key map (kbd "C-c C-d") #'gterm-send-ctrl-d)
     (define-key map (kbd "C-c C-z") #'gterm-send-ctrl-z)
+    (define-key map [escape] #'gterm-send-escape) ; GUI only; TTY ESC stays meta prefix
+    (define-key map (kbd "C-c C-e") #'gterm-send-escape)
     ;; Direct Ctrl keys (except C-c which is prefix, C-g which is quit)
     ;; Ctrl keys: skip C-c (prefix), C-g (quit), C-x (prefix),
     ;; C-h (help), C-m (same as RET), C-i (same as TAB)
@@ -660,6 +717,7 @@ Event format: (drag-n-drop POSITION (file OPERATIONS PATH...))."
     (define-key map (kbd "M-<left>") #'gterm-send-M-left)
     ;; Paste from kill ring
     (define-key map (kbd "C-y") #'gterm-yank)
+    (define-key map (kbd "M-y") #'gterm-yank-pop)
     (define-key map (kbd "s-v") #'gterm-yank)  ; Cmd-V on macOS
     ;; Copy mode
     (define-key map (kbd "C-c C-k") #'gterm-copy-mode)
@@ -682,6 +740,7 @@ Event format: (drag-n-drop POSITION (file OPERATIONS PATH...))."
   (setq-local scroll-conservatively 101)
   (setq-local scroll-margin 0)
   (setq truncate-lines t)
+  (gterm--setup-display-table)
   ;; Disable fringes to maximize terminal area
   (set-window-fringes nil 0 0)
   ;; Disable line numbers if enabled globally
